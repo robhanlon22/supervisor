@@ -2,12 +2,14 @@
 
 import asyncio
 from dataclasses import asdict, dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 import voluptuous as vol
 
+from ..const import ATTR_PASSWORD, ATTR_USERNAME
 from ..exceptions import JsonFileError, StoreError
 from ..utils.json import read_json_file, write_json_file
 from ..validate import RE_REPOSITORY
@@ -15,8 +17,8 @@ from ..validate import RE_REPOSITORY
 _SECRET = vol.All(str, vol.Length(min=1, max=4096), vol.Match(r"^[^\x00\r\n]+\Z"))
 SCHEMA_CREDENTIALS = vol.Schema(
     {
-        vol.Required("username"): vol.All(_SECRET, vol.Match(r"^[^:]+\Z")),
-        vol.Required("password"): _SECRET,
+        vol.Required(ATTR_USERNAME): vol.All(_SECRET, vol.Match(r"^[^:]+\Z")),
+        vol.Required(ATTR_PASSWORD): _SECRET,
     }
 )
 
@@ -92,7 +94,9 @@ class RepositoryCredentialStore:
 
         async with self._lock:
             try:
-                data = await asyncio.to_thread(read_json_file, self.path, default={})
+                data = await asyncio.get_running_loop().run_in_executor(
+                    None, partial(read_json_file, self.path, default={})
+                )
                 self._credentials = SCHEMA_CREDENTIAL_STORE(data)
             except JsonFileError, vol.Invalid:
                 raise StoreError("Cannot read repository credentials") from None
@@ -112,7 +116,8 @@ class RepositoryCredentialStore:
 
     async def _save(self, updated: dict[str, RepositoryCredentials]) -> None:
         """Publish credentials after Supervisor's atomic writer succeeds."""
-        await asyncio.to_thread(
+        await asyncio.get_running_loop().run_in_executor(
+            None,
             write_json_file,
             self.path,
             {url: asdict(value) for url, value in updated.items()},
