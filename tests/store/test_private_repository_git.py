@@ -3,8 +3,9 @@
 import asyncio
 import logging
 from pathlib import Path
-from unittest.mock import ANY, patch
+from unittest.mock import patch
 
+from aiohttp import web
 import git
 import pytest
 
@@ -77,7 +78,12 @@ async def test_removed_credentials_are_not_reused_after_clone(
     await cloned_private_git.set_credentials(None)
     with pytest.raises(StoreGitError):
         await cloned_private_git.pull.__wrapped__(cloned_private_git)
-    git_host.private.assert_awaited_once_with(ANY)
+    git_host.private.assert_awaited_once()
+    assert git_host.private.await_args is not None
+    request: web.Request = git_host.private.await_args.args[0]
+    assert request.headers.get("Authorization") is None
+    assert request.method == "GET"
+    assert str(request.rel_url) == "/private.git/info/refs?service=git-upload-pack"
 
 
 async def test_private_credentials_are_not_forwarded_to_a_public_submodule(
@@ -119,7 +125,12 @@ async def test_authenticated_redirect_does_not_reach_another_repository(
     repo = GitRepo(coresys, tmp_path / "clone", url)
     with pytest.raises(StoreGitCloneError):
         await repo.clone.__wrapped__(repo)
-    git_host.redirect.assert_awaited_once_with(ANY)
+    git_host.redirect.assert_awaited_once()
+    assert git_host.redirect.await_args is not None
+    request: web.Request = git_host.redirect.await_args.args[0]
+    assert request.headers.get("Authorization") == AUTHORIZATION
+    assert request.method == "GET"
+    assert str(request.rel_url) == "/redirect.git/info/refs?service=git-upload-pack"
     git_host.public.assert_not_awaited()
 
 
@@ -139,6 +150,10 @@ async def test_authenticated_errors_do_not_echo_remote_output_or_full_trace(
     repo = GitRepo(coresys, tmp_path / "clone", url)
     with pytest.raises(StoreGitCloneError) as error:
         await repo.clone.__wrapped__(repo)
+    git_host.denied.assert_awaited_once()
+    assert git_host.denied.await_args is not None
+    request: web.Request = git_host.denied.await_args.args[0]
+    assert request.headers.get("Authorization") == AUTHORIZATION
     assert error.value.__suppress_context__ is True
     assert CREDENTIALS.password not in caplog.text
     assert AUTHORIZATION not in caplog.text
