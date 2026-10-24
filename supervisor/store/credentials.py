@@ -8,8 +8,8 @@ from urllib.parse import urlsplit
 
 import voluptuous as vol
 
-from ..exceptions import StoreError
-from ..utils.json import json_loads, write_json_file
+from ..exceptions import JsonFileError, StoreError
+from ..utils.json import read_json_file, write_json_file
 from ..validate import RE_REPOSITORY
 
 _SECRET = vol.All(str, vol.Length(min=1, max=4096), vol.Match(r"^[^\x00\r\n]+\Z"))
@@ -56,6 +56,11 @@ def validate_credential_repository(repository: str) -> str:
     return repository
 
 
+SCHEMA_CREDENTIAL_STORE = vol.Schema(
+    {validate_credential_repository: parse_credentials}
+)
+
+
 class RepositoryCredentialStore:
     """Atomically persist credentials with owner-only file permissions."""
 
@@ -76,36 +81,20 @@ class RepositoryCredentialStore:
     async def restore_credentials(self, data: Any) -> None:
         """Parse and merge a private backup before repository restoration."""
         try:
-            restored = vol.Schema({validate_credential_repository: parse_credentials})(
-                data
-            )
+            restored = SCHEMA_CREDENTIAL_STORE(data)
         except vol.Invalid:
             raise StoreError("Invalid repository credentials backup") from None
         async with self._lock:
-            updated = self._credentials | restored
-            await asyncio.to_thread(
-                write_json_file,
-                self.path,
-                {url: asdict(value) for url, value in updated.items()},
-            )
-            self._credentials = updated
+            await self._save(self._credentials | restored)
 
     async def load(self) -> None:
         """Load private values without the generic configuration error logger."""
 
-        def _read() -> Any:
-            try:
-                return json_loads(self.path.read_bytes())
-            except FileNotFoundError:
-                return {}
-
         async with self._lock:
             try:
-                data = await asyncio.to_thread(_read)
-                self._credentials = vol.Schema(
-                    {validate_credential_repository: parse_credentials}
-                )(data)
-            except OSError, ValueError, vol.Invalid:
+                data = await asyncio.to_thread(read_json_file, self.path, default={})
+                self._credentials = SCHEMA_CREDENTIAL_STORE(data)
+            except JsonFileError, vol.Invalid:
                 raise StoreError("Cannot read repository credentials") from None
 
     async def set(
@@ -119,9 +108,13 @@ class RepositoryCredentialStore:
                 updated.pop(repository, None)
             else:
                 updated[repository] = credentials
-            await asyncio.to_thread(
-                write_json_file,
-                self.path,
-                {url: asdict(value) for url, value in updated.items()},
-            )
-            self._credentials = updated
+            await self._save(updated)
+
+    async def _save(self, updated: dict[str, RepositoryCredentials]) -> None:
+        """Publish credentials after Supervisor's atomic writer succeeds."""
+        await asyncio.to_thread(
+            write_json_file,
+            self.path,
+            {url: asdict(value) for url, value in updated.items()},
+        )
+        self._credentials = updated

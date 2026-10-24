@@ -347,13 +347,17 @@ def api_return_ok(data: dict[str, Any] | list[Any] | None = None) -> web.Respons
 async def api_validate(
     schema: vol.Schema | vol.All,
     request: web.Request,
+    *,
+    redact_errors: bool = False,
 ) -> dict[str, Any]:
-    """Validate request data with schema."""
+    """Validate request data, optionally omitting input values from errors."""
     data: dict[str, Any] = await request.json(loads=json_loads)
     try:
         data_validated = schema(data)
     except vol.Invalid as ex:
-        raise APIError(humanize_error(data, ex)) from None
+        raise APIError(
+            "Invalid request data" if redact_errors else humanize_error(data, ex)
+        ) from None
 
     return data_validated
 

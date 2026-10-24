@@ -4,16 +4,18 @@ import asyncio
 from dataclasses import asdict
 import os
 from pathlib import Path
-from unittest.mock import create_autospec
+from unittest.mock import create_autospec, patch
 
 from aiohttp.test_utils import TestClient
 import pytest
 
 from supervisor.coresys import CoreSys
+from supervisor.exceptions import StoreNotFound
 from supervisor.store.credentials import (
     RepositoryCredentials,
     RepositoryCredentialStore,
 )
+from supervisor.store.git import GitRepo
 from supervisor.store.repository import Repository
 from supervisor.store.utils import get_hash_from_repository
 
@@ -24,6 +26,8 @@ from tests.private_repository_support import (
     fixture_git_host as fixture_git_host,  # noqa: PLC0414 -- Re-export a shared pytest fixture.
 )
 
+_REMOVE_GIT_REPOSITORY = GitRepo.remove
+
 
 @pytest.fixture(name="credential_store")
 def fixture_credential_store(
@@ -32,6 +36,8 @@ def fixture_credential_store(
     monkeypatch: pytest.MonkeyPatch,
 ) -> RepositoryCredentialStore:
     """Use private temporary storage and signature-checked OS disk statistics."""
+    # CoreSys stubs removal to protect shared fixtures; these repositories are private copies.
+    monkeypatch.setattr(GitRepo, "remove", _REMOVE_GIT_REPOSITORY)
     disk = os.statvfs_result(
         (4096, 4096, 8_000_000, 6_000_000, 6_000_000, 100_000, 90_000, 90_000, 0, 255)
     )
@@ -134,6 +140,102 @@ async def test_remove_credentials_keeps_the_repository(
     assert response.status == 200
     assert registered_repository.has_credentials is False
     assert coresys.store.get(registered_repository.slug) is registered_repository
+    restarted = RepositoryCredentialStore(credential_store.path)
+    await restarted.load()
+    assert restarted.get(registered_repository.source) is None
+
+
+async def test_rotation_with_a_damaged_clone_keeps_saved_and_active_tokens_together(
+    api_client: TestClient,
+    registered_repository: Repository,
+    credential_store: RepositoryCredentialStore,
+    git_host: GitHost,
+) -> None:
+    """Change credentials without reopening a broken local clone."""
+    rotated = RepositoryCredentials("fixture-user", "rotated-fixture-password")
+    directory = registered_repository.local_path / ".git"
+    saved = directory.with_name(".git.saved")
+    directory.rename(saved)
+    response = await api_client.post(
+        f"/store/repositories/{registered_repository.slug}/credentials",
+        json={"credentials": asdict(rotated)},
+    )
+    saved.rename(directory)
+    assert response.status == 200
+    restarted = RepositoryCredentialStore(credential_store.path)
+    await restarted.load()
+    assert restarted.get(registered_repository.source) == rotated
+    git_host.credentials = rotated
+    assert await registered_repository.update() is False
+
+
+async def test_failed_rotation_keeps_the_saved_and_active_token(
+    api_client: TestClient,
+    registered_repository: Repository,
+    credential_store: RepositoryCredentialStore,
+) -> None:
+    """A failed file replacement must leave the previous token usable."""
+    with patch(
+        "atomicwrites.replace_atomic",
+        autospec=True,
+        spec_set=True,
+        side_effect=OSError("Interrupted commit"),
+    ):
+        response = await api_client.post(
+            f"/store/repositories/{registered_repository.slug}/credentials",
+            json={
+                "credentials": {"username": "fixture-user", "password": "replacement"}
+            },
+        )
+    assert response.status == 400
+    restarted = RepositoryCredentialStore(credential_store.path)
+    await restarted.load()
+    assert restarted.get(registered_repository.source) == CREDENTIALS
+    assert await registered_repository.update() is False
+
+
+async def test_failed_credential_deletion_keeps_repository_removal_retryable(
+    api_client: TestClient,
+    registered_repository: Repository,
+    credential_store: RepositoryCredentialStore,
+) -> None:
+    """Keep the repository until its saved credentials have been deleted."""
+    endpoint = f"/store/repositories/{registered_repository.slug}"
+    with patch(
+        "atomicwrites.replace_atomic",
+        autospec=True,
+        spec_set=True,
+        side_effect=OSError("Interrupted commit"),
+    ):
+        failed = await api_client.delete(endpoint)
+    assert failed.status == 400
+    assert (await api_client.get(endpoint)).status == 200
+    restarted = RepositoryCredentialStore(credential_store.path)
+    await restarted.load()
+    assert restarted.get(registered_repository.source) == CREDENTIALS
+    assert registered_repository.local_path.is_dir()
+
+    assert (await api_client.delete(endpoint)).status == 200
+    assert (await api_client.get(endpoint)).status == 404
+    await restarted.load()
+    assert restarted.get(registered_repository.source) is None
+    assert not registered_repository.local_path.exists()
+
+
+async def test_rotation_queued_after_removal_cannot_restore_credentials(
+    coresys: CoreSys,
+    registered_repository: Repository,
+    credential_store: RepositoryCredentialStore,
+) -> None:
+    """Reject a queued command whose repository has already been removed."""
+    removed, rotated = await asyncio.gather(
+        coresys.store.remove_repository(registered_repository),
+        coresys.store.set_repository_credentials(registered_repository, CREDENTIALS),
+        return_exceptions=True,
+    )
+    assert removed is None
+    assert isinstance(rotated, StoreNotFound)
+    assert registered_repository.slug not in coresys.store.repositories
     restarted = RepositoryCredentialStore(credential_store.path)
     await restarted.load()
     assert restarted.get(registered_repository.source) is None

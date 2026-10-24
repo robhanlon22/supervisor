@@ -1129,7 +1129,7 @@ class Backup(JobGroup):
                 tarinfo.size = len(docker_json)
                 tar_file.addfile(tarinfo, io.BytesIO(docker_json))
 
-                credentials_json = json.dumps(repository_credentials).encode("utf-8")
+                credentials_json = json_bytes(repository_credentials)
                 tarinfo = tarfile.TarInfo(name="repository_credentials.json")
                 tarinfo.size = len(credentials_json)
                 tarinfo.mode = 0o600

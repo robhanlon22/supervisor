@@ -57,6 +57,12 @@ Atomic writes keep the file private to its owner with mode `0600`. Credentials
 are not encrypted on the live filesystem. Protect Supervisor storage and host
 access.
 
+The store uses Supervisor's JSON read and atomic write helpers. Repository
+requests use the shared API validator with input values omitted from errors.
+A missing credential file starts empty. A damaged file or failed write raises
+an error and keeps the last valid in-memory credentials. The generic
+`FileConfiguration` reset and error-logging paths are not used for secrets.
+
 Git receives an authorization header through its child-process environment.
 The header is scoped to the repository URL path. It is not stored in the remote
 URL, Git configuration, or command arguments. Authenticated requests refuse
@@ -84,17 +90,3 @@ HTTPS Git server. They exercise clone, fetch, token rotation, removal, concurren
 changes, redirect refusal, submodule isolation, rejected clones, secret-safe
 errors, atomic storage, and backup restoration. No household data or real token
 is needed.
-
-This fork has not been installed on the household Supervisor. It does not change
-the current Little Rest updater.
-
-Local checks on Python 3.14.8 found:
-
-- All 40 new tests passed. Credential storage had 94% statement coverage.
-- The affected store, store API, and backup suites had 386 passes and one
-  failure in `tests/store/test_store_manager.py::test_reload`. Unchanged upstream
-  commit `d92eb0e373a304c1e6a66dcef66585854a2002d1` had the same failure.
-- Ruff, formatting, mypy, and pylint passed for the changed code.
-- Broad coverage runs failed while loading YAML fixtures on both this branch
-  and unchanged upstream. The focused credential coverage run passed. These
-  results do not establish whole-project coverage or a clean full-suite run.

@@ -75,8 +75,8 @@ class GitRepo(CoreSysAttributes):
         validate_credential_repository(self.url)
         async with self.lock:
             if self.repo is not None and credentials is not None:
-                self.repo = await self.sys_run_in_executor(
-                    _AuthenticatedRepo, str(self.path)
+                self.repo.git = await self.sys_run_in_executor(
+                    _AuthenticatedGit, str(self.repo.working_dir)
                 )
             self.credentials = credentials
 
@@ -267,6 +267,7 @@ class GitRepo(CoreSysAttributes):
             _LOGGER.info("Cloning app %s repository from %s", path, self.url)
             if authenticated:
                 git_args["env"] = self._git_environment()
+                git_args["progress"] = git.RemoteProgress()
             self.repo = await self.sys_run_in_executor(
                 ft.partial(
                     self._repository_type.clone_from,

@@ -9,6 +9,7 @@ from atomicwrites import atomic_write
 import orjson
 
 from ..exceptions import JsonFileError
+from .sentinel import DEFAULT
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
@@ -69,14 +70,17 @@ def write_json_file(jsonfile: Path, data: Any) -> None:
         ) from err
 
 
-def read_json_file(jsonfile: Path) -> Any:
+def read_json_file(jsonfile: Path, *, default: Any = DEFAULT) -> Any:
     """Read a JSON file and return a dict.
 
+    An explicit default applies only to a missing file.
     Must be run in executor.
     """
     try:
         return json_loads(jsonfile.read_bytes())
     except (OSError, ValueError, TypeError, UnicodeDecodeError) as err:
+        if isinstance(err, FileNotFoundError) and default is not DEFAULT:
+            return default
         raise JsonFileError(
             f"Can't read json from {jsonfile!s}: {err!s}", _LOGGER.error
         ) from err

@@ -1,11 +1,30 @@
 """Test API utils."""
 
 import asyncio
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, create_autospec, patch
 
+from aiohttp import web
 import pytest
+import voluptuous as vol
 
-from supervisor.api.utils import stop_on_disconnect
+from supervisor.api.utils import api_validate, json_loads, stop_on_disconnect
+from supervisor.exceptions import APIError
+
+
+@pytest.mark.parametrize(
+    ("options", "exposes_value"),
+    [({}, True), ({"redact_errors": True}, False)],
+)
+async def test_api_validation_can_hide_sensitive_values(
+    options: dict[str, bool], exposes_value: bool
+) -> None:
+    """Keep detailed errors by default and omit input for secret-bearing bodies."""
+    request = create_autospec(web.Request, instance=True, spec_set=True)
+    request.json.return_value = {"count": "fixture-secret"}
+    with pytest.raises(APIError) as error:
+        await api_validate(vol.Schema({"count": int}), request, **options)
+    assert ("fixture-secret" in str(error.value)) is exposes_value
+    request.json.assert_awaited_once_with(loads=json_loads)
 
 
 @pytest.fixture(autouse=True)

@@ -89,13 +89,18 @@ async def test_removed_credentials_are_not_reused_after_clone(
 async def test_private_credentials_are_not_forwarded_to_a_public_submodule(
     private_git: GitRepo,
     git_host: GitHost,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Scope the header to the parent repository rather than its entire host."""
+    """Keep parent credentials out of public submodule requests and clone logs."""
+    caplog.set_level(logging.DEBUG)
+    submodule_path = CREDENTIALS.password
     revision = await asyncio.to_thread(
         git_command, git_host.source, "rev-parse", "HEAD"
     )
     (git_host.source / ".gitmodules").write_text(
-        '[submodule "child"]\npath = child\nurl = ' + git_host.url("/public.git") + "\n"
+        '[submodule "child"]\n'
+        f"path = {submodule_path}\n"
+        f"url = {git_host.url('/public.git')}\n"
     )
     await asyncio.to_thread(git_command, git_host.source, "add", ".gitmodules")
     await asyncio.to_thread(
@@ -104,13 +109,15 @@ async def test_private_credentials_are_not_forwarded_to_a_public_submodule(
         "update-index",
         "--add",
         "--cacheinfo",
-        f"160000,{revision},child",
+        f"160000,{revision},{submodule_path}",
     )
     await asyncio.to_thread(git_command, git_host.source, "commit", "-m", "Submodule")
     await asyncio.to_thread(git_command, git_host.source, "push", "origin", "main")
     await private_git.clone.__wrapped__(private_git)
-    assert (private_git.path / "child/marker").read_text() == "first"
+    assert (private_git.path / submodule_path / "marker").read_text() == "first"
     git_host.public.assert_awaited()
+    assert CREDENTIALS.password not in caplog.text
+    assert AUTHORIZATION not in caplog.text
 
 
 async def test_authenticated_redirect_does_not_reach_another_repository(

@@ -45,6 +45,7 @@ class StoreManager(CoreSysAttributes, FileConfiguration):
         self.coresys: CoreSys = coresys
         self.data = StoreData(coresys)
         self._repositories: dict[str, Repository] = {}
+        self._repository_lock = asyncio.Lock()
         self.credentials = RepositoryCredentialStore(
             FILE_HASSIO_STORE.with_name("repository_credentials.json")
         )
@@ -269,50 +270,61 @@ class StoreManager(CoreSysAttributes, FileConfiguration):
 
     async def remove_repository(self, repository: Repository, *, persist: bool = True):
         """Remove a repository."""
-        if repository.is_builtin:
-            raise StoreInvalidAppRepo(
-                "Can't remove built-in repositories!", logger=_LOGGER.error
-            )
+        async with self._repository_lock:
+            if repository.is_builtin:
+                raise StoreInvalidAppRepo(
+                    "Can't remove built-in repositories!", logger=_LOGGER.error
+                )
+            if self.repositories.get(repository.slug) is not repository:
+                raise StoreNotFound
 
-        if repository.slug in (app.repository for app in self.sys_apps.installed):
-            raise StoreError(
-                f"Can't remove '{repository.source}'. It's used by installed apps",
-                logger=_LOGGER.error,
-            )
-        await self.repositories.pop(repository.slug).remove()
-        self._data[ATTR_REPOSITORIES].remove(repository.source)
-        await self.save_data()
+            if repository.slug in (app.repository for app in self.sys_apps.installed):
+                raise StoreError(
+                    f"Can't remove '{repository.source}'. It's used by installed apps",
+                    logger=_LOGGER.error,
+                )
+            if self.credentials.get(repository.source) is not None:
+                await self.credentials.set(repository.source, None)
 
-        if self.credentials.get(repository.source) is not None:
-            await self.credentials.set(repository.source, None)
+            await self.repositories.pop(repository.slug).remove()
+            self._data[ATTR_REPOSITORIES].remove(repository.source)
+            await self.save_data()
 
-        if persist:
-            await self.data.update()
-            await self._read_apps()
+            if persist:
+                await self.data.update()
+                await self._read_apps()
 
     async def set_repository_credentials(
         self, repository: Repository, credentials: RepositoryCredentials | None
     ) -> None:
         """Persist credentials and apply them before the next Git operation."""
-        if repository.is_builtin:
-            raise StoreError("Built-in repositories do not accept private credentials")
-        try:
-            validate_credential_repository(repository.source)
-        except vol.Invalid:
-            raise StoreError(
-                "Repository credentials require a clean HTTPS URL"
-            ) from None
-        await self.credentials.set(repository.source, credentials)
-        await repository.set_credentials(credentials)
+        async with self._repository_lock:
+            if repository.is_builtin:
+                raise StoreError(
+                    "Built-in repositories do not accept private credentials"
+                )
+            try:
+                validate_credential_repository(repository.source)
+            except vol.Invalid:
+                raise StoreError(
+                    "Repository credentials require a clean HTTPS URL"
+                ) from None
+            if self.repositories.get(repository.slug) is not repository:
+                raise StoreNotFound
+            await self.credentials.set(repository.source, credentials)
+            await repository.set_credentials(credentials)
 
     async def restore_repository_credentials(self, data: object) -> None:
         """Restore private credentials before private app repositories are loaded."""
-        await self.credentials.restore_credentials(data)
-        for repository in self.all:
-            if not repository.is_builtin and self.credentials.get(repository.source):
-                await repository.set_credentials(
-                    self.credentials.get(repository.source)
-                )
+        async with self._repository_lock:
+            await self.credentials.restore_credentials(data)
+            for repository in self.all:
+                if not repository.is_builtin and self.credentials.get(
+                    repository.source
+                ):
+                    await repository.set_credentials(
+                        self.credentials.get(repository.source)
+                    )
 
     @Job(name="store_manager_update_repositories")
     async def update_repositories(

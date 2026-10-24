@@ -121,15 +121,23 @@ def test_invalid_credentials_do_not_echo_values(value: dict[str, str]) -> None:
     assert "fixture-secret" not in str(error.value)
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [
+        '{"https://example.invalid/repo":{"password":"fixture-secret"}}',
+        '{"fixture-secret":',
+    ],
+)
 async def test_corrupt_file_does_not_log_or_reset_secrets(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, raw: str
 ) -> None:
     """Stop a corrupt load without printing raw values or overwriting the file."""
     path = tmp_path / "credentials.json"
-    raw = '{"https://example.invalid/repo":{"password":"fixture-secret"}}'
-    path.write_text(raw)
     store = RepositoryCredentialStore(path)
+    await store.set(URL, FIRST)
+    path.write_text(raw)
     with pytest.raises(StoreError, match="Cannot read repository credentials"):
         await store.load()
+    assert store.get(URL) == FIRST
     assert path.read_text() == raw
     assert "fixture-secret" not in caplog.text

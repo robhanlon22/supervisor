@@ -82,14 +82,6 @@ SCHEMA_REPOSITORY_CREDENTIALS = vol.Schema(
 )
 
 
-async def _private_repository_body(schema: vol.Schema, request: web.Request) -> dict:
-    """Never echo supplied secrets through validation error responses."""
-    try:
-        return schema(await request.json())
-    except ValueError, vol.Invalid:
-        raise APIError("Invalid repository configuration") from None
-
-
 SCHEMA_INSTALL = vol.Schema(
     {
         vol.Optional(ATTR_BACKGROUND, default=False): bool,
@@ -381,7 +373,7 @@ class APIStore(CoreSysAttributes):
     @api_process
     async def add_repository(self, request: web.Request) -> None:
         """Add repository to the store."""
-        body = await _private_repository_body(SCHEMA_ADD_REPOSITORY, request)
+        body = await api_validate(SCHEMA_ADD_REPOSITORY, request, redact_errors=True)
         credentials = body.get("credentials")
         if credentials is not None:
             try:
@@ -404,7 +396,9 @@ class APIStore(CoreSysAttributes):
             raise APIForbidden(
                 "Built-in repositories do not accept private credentials"
             )
-        body = await _private_repository_body(SCHEMA_REPOSITORY_CREDENTIALS, request)
+        body = await api_validate(
+            SCHEMA_REPOSITORY_CREDENTIALS, request, redact_errors=True
+        )
         await asyncio.shield(
             self.sys_store.set_repository_credentials(repository, body["credentials"])
         )
