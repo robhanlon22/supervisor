@@ -4,6 +4,8 @@ import asyncio
 from collections.abc import Awaitable
 import logging
 
+import voluptuous as vol
+
 from ..const import ATTR_REPOSITORIES, REPOSITORY_CORE, URL_HASSIO_APPS
 from ..coresys import CoreSys, CoreSysAttributes
 from ..exceptions import (
@@ -22,6 +24,11 @@ from ..resolution.const import ContextType, IssueType, SuggestionType
 from ..utils.common import FileConfiguration
 from .app import AppStore
 from .const import FILE_HASSIO_STORE, BuiltinRepository
+from .credentials import (
+    RepositoryCredentials,
+    RepositoryCredentialStore,
+    validate_credential_repository,
+)
 from .data import StoreData
 from .repository import Repository
 from .validate import DEFAULT_REPOSITORIES, SCHEMA_STORE_FILE
@@ -38,6 +45,9 @@ class StoreManager(CoreSysAttributes, FileConfiguration):
         self.coresys: CoreSys = coresys
         self.data = StoreData(coresys)
         self._repositories: dict[str, Repository] = {}
+        self.credentials = RepositoryCredentialStore(
+            FILE_HASSIO_STORE.with_name("repository_credentials.json")
+        )
 
     @property
     def all(self) -> list[Repository]:
@@ -67,6 +77,7 @@ class StoreManager(CoreSysAttributes, FileConfiguration):
 
     async def load(self) -> None:
         """Start up app store management."""
+        await self.credentials.load()
         # Make sure the built-in repositories are all present
         # This is especially important when adding new built-in repositories
         # to make sure existing installations have them.
@@ -135,12 +146,25 @@ class StoreManager(CoreSysAttributes, FileConfiguration):
         ],
         on_condition=StoreJobError,
     )
-    async def add_repository(self, url: str, *, persist: bool = True) -> None:
+    async def add_repository(
+        self,
+        url: str,
+        *,
+        persist: bool = True,
+        credentials: RepositoryCredentials | None = None,
+    ) -> None:
         """Add a repository."""
-        await self._add_repository(url, persist=persist, issue_on_error=False)
+        await self._add_repository(
+            url, persist=persist, issue_on_error=False, credentials=credentials
+        )
 
     async def _add_repository(
-        self, url: str, *, persist: bool = True, issue_on_error: bool = False
+        self,
+        url: str,
+        *,
+        persist: bool = True,
+        issue_on_error: bool = False,
+        credentials: RepositoryCredentials | None = None,
     ) -> None:
         """Add a repository."""
         if url == URL_HASSIO_APPS:
@@ -150,6 +174,9 @@ class StoreManager(CoreSysAttributes, FileConfiguration):
 
         if repository.slug in self.repositories:
             raise StoreRepositoryAlreadyAddedError(_LOGGER.error, url=url)
+
+        if credentials is not None:
+            await repository.set_credentials(credentials)
 
         # Load the repository
         try:
@@ -224,6 +251,9 @@ class StoreManager(CoreSysAttributes, FileConfiguration):
                         f"{url} is not a valid app repository", logger=_LOGGER.error
                     )
 
+        if credentials is not None:
+            await self.credentials.set(url, credentials)
+
         # Add Repository to list
         self.repositories[repository.slug] = repository
 
@@ -253,9 +283,36 @@ class StoreManager(CoreSysAttributes, FileConfiguration):
         self._data[ATTR_REPOSITORIES].remove(repository.source)
         await self.save_data()
 
+        if self.credentials.get(repository.source) is not None:
+            await self.credentials.set(repository.source, None)
+
         if persist:
             await self.data.update()
             await self._read_apps()
+
+    async def set_repository_credentials(
+        self, repository: Repository, credentials: RepositoryCredentials | None
+    ) -> None:
+        """Persist credentials and apply them before the next Git operation."""
+        if repository.is_builtin:
+            raise StoreError("Built-in repositories do not accept private credentials")
+        try:
+            validate_credential_repository(repository.source)
+        except vol.Invalid:
+            raise StoreError(
+                "Repository credentials require a clean HTTPS URL"
+            ) from None
+        await self.credentials.set(repository.source, credentials)
+        await repository.set_credentials(credentials)
+
+    async def restore_repository_credentials(self, data: object) -> None:
+        """Restore private credentials before private app repositories are loaded."""
+        await self.credentials.restore_credentials(data)
+        for repository in self.all:
+            if not repository.is_builtin and self.credentials.get(repository.source):
+                await repository.set_credentials(
+                    self.credentials.get(repository.source)
+                )
 
     @Job(name="store_manager_update_repositories")
     async def update_repositories(

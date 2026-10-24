@@ -747,6 +747,8 @@ class BackupManager(FileConfiguration, JobGroup):
                     delta_success = await backup.remove_delta_apps()
                     success = success and delta_success
 
+                await backup.restore_repository_credentials()
+
                 if app_list:
                     self._change_stage(RestoreJobStage.APP_REPOSITORIES, backup)
                     await backup.restore_repositories(replace)

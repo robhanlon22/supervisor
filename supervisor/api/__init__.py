@@ -1140,6 +1140,14 @@ class RestAPI(CoreSysAttributes):
                     api_store.repositories_repository_info,
                 ),
                 web.post("/store/repositories", api_store.add_repository),
+                web.post(
+                    "/store/repositories/{repository}/credentials",
+                    api_store.set_repository_credentials,
+                ),
+                web.delete(
+                    "/store/repositories/{repository}/credentials",
+                    api_store.remove_repository_credentials,
+                ),
                 web.delete(
                     "/store/repositories/{repository}", api_store.remove_repository
                 ),

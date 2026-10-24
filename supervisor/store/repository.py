@@ -21,6 +21,7 @@ from ..exceptions import (
 from ..utils import get_latest_mtime
 from ..utils.common import read_json_or_yaml_file
 from .const import BuiltinRepository
+from .credentials import RepositoryCredentials
 from .git import GitRepo
 from .utils import get_hash_from_repository
 from .validate import SCHEMA_REPOSITORY_CONFIG
@@ -100,6 +101,15 @@ class Repository(CoreSysAttributes, ABC):
     def maintainer(self) -> str:
         """Return url of repository."""
         return self.data.get(ATTR_MAINTAINER, UNKNOWN)
+
+    @property
+    def has_credentials(self) -> bool:
+        """Report credential presence without exposing private values."""
+        return False
+
+    async def set_credentials(self, credentials: RepositoryCredentials | None) -> None:
+        """Reject credentials for built-in repositories."""
+        raise StoreError("Built-in repositories do not accept private credentials")
 
     @property
     @abstractmethod
@@ -278,6 +288,15 @@ class RepositoryCustom(RepositoryGit):
     def is_builtin(self) -> bool:
         """Return True if this is a built-in repository."""
         return False
+
+    @property
+    def has_credentials(self) -> bool:
+        """Report whether this repository has private credentials."""
+        return self._git.credentials is not None
+
+    async def set_credentials(self, credentials: RepositoryCredentials | None) -> None:
+        """Rotate credentials without changing the repository URL or ID."""
+        await self._git.set_credentials(credentials)
 
     async def remove(self) -> None:
         """Remove app repository."""

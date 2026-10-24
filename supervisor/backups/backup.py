@@ -61,6 +61,7 @@ from ..exceptions import (
     BackupPermissionError,
     MountActivationError,
     MountError,
+    StoreError,
 )
 from ..homeassistant.const import LANDINGPAGE
 from ..jobs.const import JOB_GROUP_BACKUP
@@ -1053,6 +1054,29 @@ class Backup(JobGroup):
             set(self.repositories), issue_on_error=True, replace=replace
         )
 
+    async def restore_repository_credentials(self) -> None:
+        """Restore secrets from the private payload before cloning repositories."""
+        supervisor_file = self._get_inner_tar("supervisor")
+        if supervisor_file is None:
+            return
+
+        def _load() -> object | None:
+            with supervisor_file as archive:
+                for member in archive:
+                    if member.name == "repository_credentials.json":
+                        stream = archive.extractfile(member)
+                        if stream is None or member.size > 1_000_000:
+                            raise BackupError("Invalid repository credentials backup")
+                        return json.loads(stream.read())
+            return None
+
+        try:
+            data = await self.sys_run_in_executor(_load)
+            if data is not None:
+                await self.sys_store.restore_repository_credentials(data)
+        except OSError, ValueError, tarfile.TarError, StoreError:
+            raise BackupError("Cannot restore repository credentials") from None
+
     @Job(name="backup_store_supervisor_config", cleanup=False)
     async def store_supervisor_config(self) -> None:
         """Store supervisor configuration into backup as encrypted tar."""
@@ -1062,8 +1086,9 @@ class Backup(JobGroup):
             )
 
         registries = self.sys_docker.config.registries
+        repository_credentials = self.sys_store.credentials.export_credentials()
 
-        if not self.sys_mounts.mounts and not registries:
+        if not self.sys_mounts.mounts and not registries and not repository_credentials:
             return
 
         mounts_data = {
@@ -1103,6 +1128,12 @@ class Backup(JobGroup):
                 tarinfo = tarfile.TarInfo(name="docker.json")
                 tarinfo.size = len(docker_json)
                 tar_file.addfile(tarinfo, io.BytesIO(docker_json))
+
+                credentials_json = json.dumps(repository_credentials).encode("utf-8")
+                tarinfo = tarfile.TarInfo(name="repository_credentials.json")
+                tarinfo.size = len(credentials_json)
+                tarinfo.mode = 0o600
+                tar_file.addfile(tarinfo, io.BytesIO(credentials_json))
 
             _LOGGER.info("Backup supervisor configuration done")
 

@@ -17,6 +17,8 @@ Installation instructions can be found at https://home-assistant.io/getting-star
 For small changes and bugfixes you can just follow this, but for significant changes open a RFC first.
 Development instructions can be found [here][development].
 
+This fork adds [private HTTPS app repositories](PRIVATE_REPOSITORIES.md).
+
 ## Release
 
 Releases are done in 3 stages (channels) with this structure:

@@ -1,12 +1,14 @@
 """Init file for Supervisor app Git."""
 
 import asyncio
+import base64
 import configparser
 from contextlib import suppress
 import functools as ft
 import logging
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Any
 
 import git
 
@@ -21,9 +23,22 @@ from ..exceptions import (
 from ..jobs.decorator import Job, JobCondition
 from ..resolution.const import ContextType, IssueType, SuggestionType
 from ..utils import directory_missing_or_empty, remove_folder
+from .credentials import RepositoryCredentials, validate_credential_repository
 from .validate import RE_REPOSITORY
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
+
+
+class _AuthenticatedGit(git.Git):
+    """Never print authenticated command output through GitPython tracing."""
+
+    GIT_PYTHON_TRACE = False
+
+
+class _AuthenticatedRepo(git.Repo):
+    """Use the trace-safe command boundary for an authenticated repository."""
+
+    GitCommandWrapperType = _AuthenticatedGit
 
 
 class GitRepo(CoreSysAttributes):
@@ -35,6 +50,7 @@ class GitRepo(CoreSysAttributes):
         self.repo: git.Repo | None = None
         self.path: Path = path
         self.lock: asyncio.Lock = asyncio.Lock()
+        self.credentials = coresys.store.credentials.get(url)
 
         if not (repository := RE_REPOSITORY.match(url)):
             raise ValueError(f"Invalid url provided for repository GitRepo: {url}")
@@ -54,6 +70,57 @@ class GitRepo(CoreSysAttributes):
         """Return repository branch."""
         return self.data[ATTR_BRANCH]
 
+    async def set_credentials(self, credentials: RepositoryCredentials | None) -> None:
+        """Apply rotated credentials between complete Git operations."""
+        validate_credential_repository(self.url)
+        async with self.lock:
+            if self.repo is not None and credentials is not None:
+                self.repo = await self.sys_run_in_executor(
+                    _AuthenticatedRepo, str(self.path)
+                )
+            self.credentials = credentials
+
+    @property
+    def _repository_type(self) -> type[git.Repo]:
+        """Select a trace-safe command boundary when credentials are present."""
+        return _AuthenticatedRepo if self.credentials is not None else git.Repo
+
+    def _git_environment(self) -> dict[str, str]:
+        """Pass scoped authentication through the child environment, never argv."""
+        if self.credentials is None:
+            return {}
+        validate_credential_repository(self.url)
+        basic = base64.b64encode(
+            f"{self.credentials.username}:{self.credentials.password}".encode()
+        ).decode("ascii")
+        return {
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_ALLOW_PROTOCOL": "https",
+            "GIT_CONFIG_COUNT": "3",
+            "GIT_CONFIG_KEY_0": f"http.{self.url.rstrip('/')}.extraHeader",
+            "GIT_CONFIG_VALUE_0": f"Authorization: Basic {basic}",
+            "GIT_CONFIG_KEY_1": "http.followRedirects",
+            "GIT_CONFIG_VALUE_1": "false",
+            "GIT_CONFIG_KEY_2": "credential.helper",
+            "GIT_CONFIG_VALUE_2": "",
+            "GIT_TRACE": "0",
+            "GIT_TRACE_PACKET": "0",
+            "GIT_TRACE_CURL": "0",
+            "GIT_CURL_VERBOSE": "0",
+            "GIT_TRACE2": "0",
+            "GIT_TRACE2_EVENT": "0",
+            "GIT_TRACE2_PERF": "0",
+            "GIT_TRACE_REDACT": "1",
+        }
+
+    def _error_detail(
+        self, error: Exception, *, authenticated: bool | None = None
+    ) -> str:
+        """Do not log server-controlled output from authenticated requests."""
+        if authenticated or self.credentials is not None:
+            return "Authenticated Git operation failed"
+        return str(error)
+
     async def load(self) -> None:
         """Init Git app repository."""
         if await self.sys_run_in_executor(directory_missing_or_empty, self.path):
@@ -65,7 +132,7 @@ class GitRepo(CoreSysAttributes):
             try:
                 _LOGGER.info("Loading app %s repository", self.path)
                 repo: git.Repo = await self.sys_run_in_executor(
-                    git.Repo, str(self.path)
+                    self._repository_type, str(self.path)
                 )
                 self.repo = repo
 
@@ -184,7 +251,8 @@ class GitRepo(CoreSysAttributes):
     async def _clone(self, path: Path | None = None) -> None:
         """Clone git app repository to location."""
         path = path or self.path
-        git_args = {
+        authenticated = self.credentials is not None
+        git_args: dict[str, Any] = {
             attribute: value
             for attribute, value in (
                 ("recursive", True),
@@ -197,14 +265,20 @@ class GitRepo(CoreSysAttributes):
 
         try:
             _LOGGER.info("Cloning app %s repository from %s", path, self.url)
+            if authenticated:
+                git_args["env"] = self._git_environment()
             self.repo = await self.sys_run_in_executor(
                 ft.partial(
-                    git.Repo.clone_from,
+                    self._repository_type.clone_from,
                     self.url,
                     str(path),
-                    **git_args,  # type: ignore
+                    **git_args,
                 )
             )
+            if authenticated:
+                # GitPython copies clone's environment into the returned Repo.
+                # Subsequent operations must use the current credentials instead.
+                self.repo.git.update_environment(**dict.fromkeys(git_args["env"], None))
 
         except (
             git.InvalidGitRepositoryError,
@@ -212,8 +286,14 @@ class GitRepo(CoreSysAttributes):
             git.CommandError,
             UnicodeDecodeError,
         ) as err:
-            _LOGGER.error("Can't clone %s repository: %s.", self.url, err)
-            raise StoreGitCloneError from err
+            _LOGGER.error(
+                "Can't clone %s repository: %s.",
+                self.url,
+                self._error_detail(err, authenticated=authenticated),
+            )
+            raise StoreGitCloneError(
+                "Authenticated Git operation failed" if authenticated else None
+            ) from (None if authenticated else err)
 
     @Job(
         name="git_repo_pull",
@@ -237,11 +317,22 @@ class GitRepo(CoreSysAttributes):
                 await self.sys_run_in_executor(self._sync_origin_remote_url, repo)
 
             try:
-                git_cmd = git.Git()
-                await self.sys_run_in_executor(git_cmd.ls_remote, "--heads", self.url)
+                git_cmd = (
+                    _AuthenticatedGit() if self.credentials is not None else git.Git()
+                )
+                with git_cmd.custom_environment(**self._git_environment()):
+                    await self.sys_run_in_executor(
+                        git_cmd.ls_remote, "--heads", self.url
+                    )
             except git.CommandError as err:
-                _LOGGER.warning("Wasn't able to update %s repo: %s.", self.url, err)
-                raise StoreGitError from err
+                _LOGGER.warning(
+                    "Wasn't able to update %s repo: %s.",
+                    self.url,
+                    self._error_detail(err),
+                )
+                raise StoreGitError(
+                    "Authenticated Git operation failed" if self.credentials else None
+                ) from (None if self.credentials else err)
 
             try:
 
@@ -249,9 +340,10 @@ class GitRepo(CoreSysAttributes):
                     """Fetch from origin and check if changed."""
                     # This property access is I/O bound
                     branch = repo.active_branch.name
-                    repo.remotes.origin.fetch(
-                        **{"update-shallow": True, "depth": 1}  # type: ignore[arg-type]
-                    )
+                    with repo.git.custom_environment(**self._git_environment()):
+                        repo.remotes.origin.fetch(
+                            **{"update-shallow": True, "depth": 1}  # type: ignore[arg-type]
+                        )
                     changed = repo.commit(branch) != repo.commit(f"origin/{branch}")
                     return branch, changed
 
@@ -265,16 +357,17 @@ class GitRepo(CoreSysAttributes):
                     )
 
                 # Update submodules
-                await self.sys_run_in_executor(
-                    ft.partial(
-                        repo.git.submodule,
-                        "update",
-                        "--init",
-                        "--recursive",
-                        "--depth",
-                        "1",
+                with repo.git.custom_environment(**self._git_environment()):
+                    await self.sys_run_in_executor(
+                        ft.partial(
+                            repo.git.submodule,
+                            "update",
+                            "--init",
+                            "--recursive",
+                            "--depth",
+                            "1",
+                        )
                     )
-                )
 
                 # Cleanup old data
                 await self.sys_run_in_executor(ft.partial(repo.git.clean, "-xdf"))
@@ -290,14 +383,18 @@ class GitRepo(CoreSysAttributes):
                 AttributeError,
                 UnicodeDecodeError,
             ) as err:
-                _LOGGER.error("Can't update %s repo: %s.", self.url, err)
+                _LOGGER.error(
+                    "Can't update %s repo: %s.", self.url, self._error_detail(err)
+                )
                 self.sys_resolution.create_issue(
                     IssueType.CORRUPT_REPOSITORY,
                     ContextType.STORE,
                     reference=self.path.stem,
                     suggestions=[SuggestionType.EXECUTE_RESET],
                 )
-                raise StoreGitError from err
+                raise StoreGitError(
+                    "Authenticated Git operation failed" if self.credentials else None
+                ) from (None if self.credentials else err)
 
     async def remove(self) -> None:
         """Remove a repository."""

@@ -57,6 +57,7 @@ from ..coresys import CoreSysAttributes
 from ..exceptions import APIError, APIForbidden, APINotFound, StoreAppNotFoundError
 from ..resolution.const import ContextType, SuggestionType
 from ..store.app import AppStore
+from ..store.credentials import parse_credentials, validate_credential_repository
 from ..store.repository import Repository
 from ..store.validate import validate_repository
 from .const import ATTR_BACKGROUND, CONTENT_TYPE_PNG, CONTENT_TYPE_TEXT
@@ -70,8 +71,24 @@ SCHEMA_UPDATE = vol.Schema(
 )
 
 SCHEMA_ADD_REPOSITORY = vol.Schema(
-    {vol.Required(ATTR_REPOSITORY): vol.All(str, validate_repository)}
+    {
+        vol.Required(ATTR_REPOSITORY): vol.All(str, validate_repository),
+        vol.Optional("credentials"): parse_credentials,
+    }
 )
+
+SCHEMA_REPOSITORY_CREDENTIALS = vol.Schema(
+    {vol.Required("credentials"): parse_credentials}
+)
+
+
+async def _private_repository_body(schema: vol.Schema, request: web.Request) -> dict:
+    """Never echo supplied secrets through validation error responses."""
+    try:
+        return schema(await request.json())
+    except ValueError, vol.Invalid:
+        raise APIError("Invalid repository configuration") from None
+
 
 SCHEMA_INSTALL = vol.Schema(
     {
@@ -189,6 +206,7 @@ class APIStore(CoreSysAttributes):
             ATTR_SOURCE: repository.source,
             ATTR_URL: repository.url,
             ATTR_MAINTAINER: repository.maintainer,
+            "has_credentials": repository.has_credentials,
         }
 
     async def _all_store_apps_info(self) -> list[dict[str, Any]]:
@@ -363,8 +381,45 @@ class APIStore(CoreSysAttributes):
     @api_process
     async def add_repository(self, request: web.Request) -> None:
         """Add repository to the store."""
-        body = await api_validate(SCHEMA_ADD_REPOSITORY, request)
-        await asyncio.shield(self.sys_store.add_repository(body[ATTR_REPOSITORY]))
+        body = await _private_repository_body(SCHEMA_ADD_REPOSITORY, request)
+        credentials = body.get("credentials")
+        if credentials is not None:
+            try:
+                validate_credential_repository(body[ATTR_REPOSITORY])
+            except vol.Invalid:
+                raise APIError(
+                    "Repository credentials require a clean HTTPS URL"
+                ) from None
+        await asyncio.shield(
+            self.sys_store.add_repository(
+                body[ATTR_REPOSITORY], credentials=credentials
+            )
+        )
+
+    @api_process
+    async def set_repository_credentials(self, request: web.Request) -> None:
+        """Set or rotate write-only repository credentials."""
+        repository = self._extract_repository(request)
+        if repository.is_builtin:
+            raise APIForbidden(
+                "Built-in repositories do not accept private credentials"
+            )
+        body = await _private_repository_body(SCHEMA_REPOSITORY_CREDENTIALS, request)
+        await asyncio.shield(
+            self.sys_store.set_repository_credentials(repository, body["credentials"])
+        )
+
+    @api_process
+    async def remove_repository_credentials(self, request: web.Request) -> None:
+        """Remove credentials without changing repository identity."""
+        repository = self._extract_repository(request)
+        if repository.is_builtin:
+            raise APIForbidden(
+                "Built-in repositories do not accept private credentials"
+            )
+        await asyncio.shield(
+            self.sys_store.set_repository_credentials(repository, None)
+        )
 
     @api_process
     async def remove_repository(self, request: web.Request) -> None:

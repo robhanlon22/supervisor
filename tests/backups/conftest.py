@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from supervisor.backups.backup import BackupLocation
+from supervisor.backups.backup import Backup, BackupLocation
 from supervisor.backups.const import LOCATION_CLOUD_BACKUP, LOCATION_TYPE, BackupType
 from supervisor.backups.validate import ALL_FOLDERS
 from supervisor.coresys import CoreSys
@@ -30,6 +30,9 @@ def fixture_backup_mock():
         backup_instance.restore_homeassistant = AsyncMock(return_value=None)
         backup_instance.restore_apps = AsyncMock(return_value=(True, []))
         backup_instance.restore_repositories = AsyncMock(return_value=None)
+        backup_instance.restore_repository_credentials = AsyncMock(
+            spec_set=Backup.restore_repository_credentials, return_value=None
+        )
         backup_instance.restore_supervisor_config = AsyncMock(return_value=(True, []))
         backup_instance.remove_delta_apps = AsyncMock(return_value=True)
 
