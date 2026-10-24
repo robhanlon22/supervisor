@@ -52,7 +52,6 @@ class GitHost:
 
     server: TestServer
     source: Path
-    root: Path
     private: AsyncMock
     public: AsyncMock
     redirect: AsyncMock
@@ -181,5 +180,5 @@ async def fixture_git_host(
     app.router.add_route("*", "/redirect.git/{tail:.*}", redirect)
     app.router.add_route("*", "/denied.git/{tail:.*}", denied)
     server = await aiohttp_server(app, scheme="https", ssl=context)
-    host = GitHost(server, source, root, private, public, redirect, denied)
+    host = GitHost(server, source, private, public, redirect, denied)
     return host

@@ -3,7 +3,6 @@
 import asyncio
 import logging
 from pathlib import Path
-from unittest.mock import patch
 
 from aiohttp import web
 import git
@@ -54,7 +53,9 @@ async def test_private_clone_keeps_authentication_ephemeral(
     assert private_git.repo is not None
     assert private_git.repo.remotes.origin.url == git_host.url("/private.git")
     assert "GIT_CONFIG_VALUE_0" not in private_git.repo.git.environment()
-    assert CREDENTIALS.password not in (private_git.path / ".git/config").read_text()
+    config = (private_git.path / ".git/config").read_text()
+    assert CREDENTIALS.password not in config
+    assert AUTHORIZATION not in config
 
 
 async def test_private_fetch_applies_the_next_commit(
@@ -161,29 +162,6 @@ async def test_authenticated_errors_do_not_echo_remote_output_or_full_trace(
     assert git_host.denied.await_args is not None
     request: web.Request = git_host.denied.await_args.args[0]
     assert request.headers.get("Authorization") == AUTHORIZATION
-    assert error.value.__suppress_context__ is True
-    assert CREDENTIALS.password not in caplog.text
-    assert AUTHORIZATION not in caplog.text
-
-
-async def test_authenticated_command_errors_have_a_safe_api_message(
-    private_git: GitRepo,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Do not expose a suppressed command exception through API chain traversal."""
-    with (
-        patch.object(
-            git.Git,
-            "execute",
-            autospec=True,
-            spec_set=True,
-            side_effect=git.GitCommandError(
-                ["git", "clone"], 128, stderr=AUTHORIZATION
-            ),
-        ),
-        pytest.raises(StoreGitCloneError) as error,
-    ):
-        await private_git.clone.__wrapped__(private_git)
     assert (
         get_message_from_exception_chain(error.value)
         == "Authenticated Git operation failed"

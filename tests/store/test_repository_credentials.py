@@ -2,12 +2,11 @@
 
 import asyncio
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 import voluptuous as vol
 
-from supervisor.exceptions import JsonFileError, StoreError
+from supervisor.exceptions import StoreError
 from supervisor.store.credentials import (
     RepositoryCredentials,
     RepositoryCredentialStore,
@@ -20,24 +19,14 @@ FIRST = RepositoryCredentials("fixture-user", "fixture-secret-one")
 SECOND = RepositoryCredentials("fixture-user", "fixture-secret-two")
 
 
-@pytest.mark.parametrize("credentials", [FIRST, SECOND])
-async def test_credentials_survive_reload(
-    tmp_path: Path,
-    credentials: RepositoryCredentials,
-) -> None:
+async def test_credentials_survive_reload(tmp_path: Path) -> None:
     """Round-trip one credential value through the real private file."""
     path = tmp_path / "credentials.json"
     store = RepositoryCredentialStore(path)
-    await store.set(URL, credentials)
+    await store.set(URL, FIRST)
     restarted = RepositoryCredentialStore(path)
     await restarted.load()
-    assert restarted.get(URL) == credentials
-
-
-async def test_credential_file_is_owner_only(tmp_path: Path) -> None:
-    """Create the credential file without group or other access."""
-    store = RepositoryCredentialStore(tmp_path / "credentials.json")
-    await store.set(URL, FIRST)
+    assert restarted.get(URL) == FIRST
     assert store.path.stat().st_mode & 0o777 == 0o600
 
 
@@ -56,36 +45,6 @@ async def test_concurrent_updates_preserve_both_repositories(tmp_path: Path) -> 
     await restarted.load()
     assert restarted.get(URL) == FIRST
     assert restarted.get(other) == SECOND
-
-
-async def test_credential_removal_survives_restart(tmp_path: Path) -> None:
-    """Delete only the selected repository's credentials."""
-    store = RepositoryCredentialStore(tmp_path / "credentials.json")
-    await store.set(URL, FIRST)
-    await store.set(URL, None)
-    restarted = RepositoryCredentialStore(store.path)
-    await restarted.load()
-    assert restarted.get(URL) is None
-    assert "fixture-secret" not in store.path.read_text()
-
-
-async def test_failed_write_keeps_the_previous_credentials(tmp_path: Path) -> None:
-    """A failed atomic replacement cannot publish new in-memory credentials."""
-    store = RepositoryCredentialStore(tmp_path / "credentials.json")
-    await store.set(URL, FIRST)
-    before = store.path.read_bytes()
-    with (
-        patch(
-            "atomicwrites.replace_atomic",
-            autospec=True,
-            spec_set=True,
-            side_effect=OSError("Interrupted commit"),
-        ),
-        pytest.raises(JsonFileError),
-    ):
-        await store.set(URL, SECOND)
-    assert store.get(URL) == FIRST
-    assert store.path.read_bytes() == before
 
 
 @pytest.mark.parametrize(

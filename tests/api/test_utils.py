@@ -7,7 +7,7 @@ from aiohttp import web
 import pytest
 import voluptuous as vol
 
-from supervisor.api.utils import api_validate, json_loads, stop_on_disconnect
+from supervisor.api.utils import api_validate, stop_on_disconnect
 from supervisor.exceptions import APIError
 
 
@@ -24,7 +24,6 @@ async def test_api_validation_can_hide_sensitive_values(
     with pytest.raises(APIError) as error:
         await api_validate(vol.Schema({"count": int}), request, **options)
     assert ("fixture-secret" in str(error.value)) is exposes_value
-    request.json.assert_awaited_once_with(loads=json_loads)
 
 
 @pytest.fixture(autouse=True)

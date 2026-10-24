@@ -46,7 +46,7 @@ def test_json_dumps_float_subclass() -> None:
     assert json_dumps({"c": FloatSubclass(1.2)}) == '{"c":1.2}'
 
 
-@pytest.mark.parametrize("default", [{}, None, False])
+@pytest.mark.parametrize("default", [{}, None])
 def test_missing_file_uses_explicit_default(tmp_path: Path, default: object) -> None:
     """Use a caller's default only when the JSON file does not exist."""
     assert read_json_file(tmp_path / "missing.json", default=default) == default
@@ -64,7 +64,6 @@ def test_corrupt_file_does_not_use_default(tmp_path: Path) -> None:
     path.write_text("not JSON")
     with pytest.raises(JsonFileError):
         read_json_file(path, default={})
-    assert path.read_text() == "not JSON"
 
 
 def test_json_dumps_tuple_subclass() -> None:

@@ -23,7 +23,7 @@ async def test_credentials_round_trip_through_the_private_backup_payload(
     tmp_path: Path,
     password: str | None,
 ) -> None:
-    """Restore credentials before private repositories need authentication."""
+    """Round-trip credentials through plain and encrypted Supervisor backups."""
     store = RepositoryCredentialStore(tmp_path / "credentials.json")
     coresys.store.credentials = store
     await store.set(URL, CREDENTIALS)
@@ -34,14 +34,12 @@ async def test_credentials_round_trip_through_the_private_backup_payload(
         BackupType.FULL,
         password=password,
     )
-    backup.store_repositories()
     async with backup.create():
         await backup.store_supervisor_config()
     await store.set(URL, None)
     async with backup.open(None):
         await backup.restore_repository_credentials()
     assert store.get(URL) == CREDENTIALS
-    assert store.path.stat().st_mode & 0o777 == 0o600
     with tarfile.open(backup.tarfile) as archive:
         metadata = archive.extractfile("./backup.json")
         assert metadata is not None

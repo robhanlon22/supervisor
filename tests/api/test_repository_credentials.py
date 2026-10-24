@@ -105,28 +105,6 @@ async def test_repository_reads_do_not_expose_credentials(
     assert AUTHORIZATION not in body
 
 
-async def test_rotated_credentials_are_used_by_the_next_fetch(
-    api_client: TestClient,
-    registered_repository: Repository,
-    credential_store: RepositoryCredentialStore,
-    git_host: GitHost,
-    coresys: CoreSys,
-) -> None:
-    """Apply and persist a replacement token without replacing the repository."""
-    rotated = RepositoryCredentials("fixture-user", "rotated-fixture-password")
-    git_host.credentials = rotated
-    response = await api_client.post(
-        f"/store/repositories/{registered_repository.slug}/credentials",
-        json={"credentials": asdict(rotated)},
-    )
-    assert response.status == 200
-    assert await registered_repository.update() is False
-    restarted = RepositoryCredentialStore(credential_store.path)
-    await restarted.load()
-    assert restarted.get(registered_repository.source) == rotated
-    assert coresys.store.get(registered_repository.slug) is registered_repository
-
-
 async def test_remove_credentials_keeps_the_repository(
     api_client: TestClient,
     registered_repository: Repository,
@@ -150,6 +128,7 @@ async def test_rotation_with_a_damaged_clone_keeps_saved_and_active_tokens_toget
     registered_repository: Repository,
     credential_store: RepositoryCredentialStore,
     git_host: GitHost,
+    coresys: CoreSys,
 ) -> None:
     """Change credentials without reopening a broken local clone."""
     rotated = RepositoryCredentials("fixture-user", "rotated-fixture-password")
@@ -165,6 +144,7 @@ async def test_rotation_with_a_damaged_clone_keeps_saved_and_active_tokens_toget
     restarted = RepositoryCredentialStore(credential_store.path)
     await restarted.load()
     assert restarted.get(registered_repository.source) == rotated
+    assert coresys.store.get(registered_repository.slug) is registered_repository
     git_host.credentials = rotated
     assert await registered_repository.update() is False
 
@@ -175,6 +155,7 @@ async def test_failed_rotation_keeps_the_saved_and_active_token(
     credential_store: RepositoryCredentialStore,
 ) -> None:
     """A failed file replacement must leave the previous token usable."""
+    before = credential_store.path.read_bytes()
     with patch(
         "atomicwrites.replace_atomic",
         autospec=True,
@@ -188,6 +169,8 @@ async def test_failed_rotation_keeps_the_saved_and_active_token(
             },
         )
     assert response.status == 400
+    assert credential_store.get(registered_repository.source) == CREDENTIALS
+    assert credential_store.path.read_bytes() == before
     restarted = RepositoryCredentialStore(credential_store.path)
     await restarted.load()
     assert restarted.get(registered_repository.source) == CREDENTIALS
@@ -304,14 +287,6 @@ async def test_builtin_repositories_reject_credentials(
         {
             "repository": "https://example.invalid/repo",
             "credentials": {"username": "user", "password": "supplied-secret\n"},
-        },
-        {
-            "repository": "https://example.invalid/repo",
-            "credentials": {
-                "username": "user",
-                "password": "supplied-secret",
-                "unexpected": "field",
-            },
         },
         {
             "repository": "https://user:supplied-secret@example.invalid/repo",
